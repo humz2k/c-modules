@@ -53,3 +53,5 @@ dkms.conf
 .vscode
 __pycache__
 __ccache__
+**/__pycache__
+**/__ccache__

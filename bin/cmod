@@ -13,7 +13,7 @@ import argparse
 
 echo = False
 force_rebuild = False
-lib_path = "/Users/humzaqureshi/GitHub/c-modules/libraries"
+lib_path = os.path.abspath(os.path.join(os.path.join(os.path.dirname( __file__ ), '..'),'libraries'))
 
 def system(string):
     global echo
