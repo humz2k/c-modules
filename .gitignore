@@ -50,5 +50,6 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
-.vscode/settings.json
-__pycache__/includes_std.cpython-39.pyc
+.vscode
+__pycache__
+__ccache__

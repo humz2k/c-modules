@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+sys.path = [os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..'))] + sys.path
+from pycparser import parse_file, c_generator
+from pycparser.c_ast import NodeVisitor
+import pycparser
+from includes_std import *
+import re
+import argparse
+
+
+echo = False
+force_rebuild = False
+lib_path = "/Users/humzaqureshi/GitHub/c-modules/libraries"
+
+def system(string):
+    global echo
+    if (echo):
+        print(string)
+    os.system(string)
+
+class DeclarationExtractor(NodeVisitor):
+    def __init__(self):
+        self.declarations = []
+        self.generator = c_generator.CGenerator()
+
+    def visit_FuncDecl(self, node):
+        decl = self.generator.visit(node.type)
+        if node.type.declname:
+            decl += ' ' + node.type.declname
+        self.declarations.append(decl + ';')
+
+    def visit_Decl(self, node):
+        if isinstance(node.type, (pycparser.c_ast.Struct, pycparser.c_ast.Union)) and node.name is None:
+            # This handles anonymous structs and unions within typedefs
+            self.visit(node.type)
+        elif node.init is None:  # Filter out variable declarations without initialization (globals)
+            decl = self.generator.visit(node)
+            if isinstance(node.type,pycparser.c_ast.FuncDecl):
+                if 'static' in node.storage:
+                    return
+                self.declarations.append(decl + ';')
+            #print(decl,node.type)
+            #self.declarations.append(decl + ';')
+
+    def visit_Struct(self, node):
+        if not node.decls:  # Skip forward declarations of structs
+            return
+        decl = self.generator.visit(node)
+        self.declarations.append(decl + ';')
+
+    def visit_Typedef(self, node):
+        decl = self.generator.visit(node)
+        self.declarations.append(decl + ';')
+
+def extract_declarations(c_file_path):
+    ast = parse_file(c_file_path, use_cpp=True, cpp_path='gcc', cpp_args=['-E', r'-I/Users/humzaqureshi/GitHub/c-modules/fake_libc_include'])
+    extractor = DeclarationExtractor()
+    extractor.visit(ast)
+    return extractor.declarations
+
+def replace_begin_end(out):
+    out2 = []
+    for i in out.splitlines():
+        if i.strip().startswith("void _begin_"):
+            mod_name = "_begin_".join(i.strip().split("_begin_")[1:]).split("(void)")[0]
+            out2.append("#ifndef _IMPORTED_MODULE_" + mod_name + "_\n#define _IMPORTED_MODULE_" + mod_name + "_")
+            out2.append(i)
+        elif i.strip().startswith("void _end_"):
+            mod_name = "_end_".join(i.strip().split("_end_")[1:]).split("(void)")[0]
+            out2.append(i)
+            out2.append("#endif")
+        else:
+            out2.append(i)
+    out = "\n".join(out2)
+    return out
+
+def write_header_file(declarations, header_file_path, modules,actual_name=""):
+    out = ""
+    for decl in declarations:
+        out += decl + "\n"
+    out = out.replace(stdlib_h,"#include <stdlib.h>\n#include <stdio.h>\n#include <math.h>\n")
+    module_name = header_file_path.split("/")[-1].split(".")[0].strip().replace(" ","_")
+    out = "void _begin_" + str(module_name) + actual_name + "(void);\n" + out + "void _end_" + str(module_name) + actual_name + "(void);\n"
+    #for i in modules:
+    #    out += "#define _IMPORTED_MODULE_" + str(i) + "_\n"
+    out = replace_begin_end(out)
+    with open(header_file_path, 'w') as header_file:
+        header_file.write(out)
+
+def get_header_file(c_file_path,header_file_path, modules,actual_name=""):
+    declarations = extract_declarations(c_file_path)
+    write_header_file(declarations, header_file_path, modules,actual_name)
+
+def get_header_name(module_name):
+    return module_name + ".h"
+
+def replace_imports_and_find_modules(c_file_path,temp_file_path):
+    with open(c_file_path,"r") as f:
+        text = "\n".join([i for i in f.read().split("\n") if not i.strip().startswith("//")])
+    pattern = r'import\s+\w+;'
+    matches = re.findall(pattern, text)
+    modules = []
+    for i in matches:
+        module_name = i[len("import"):].split(";")[0].strip()
+        modules.append(module_name)
+        text = text.replace(i,'#include "' + get_header_name(module_name) + '"\n#define _IMPORTED_MODULE_' + module_name + '_')
+    with open(temp_file_path,"w") as f:
+        f.write(text)
+    return modules
+
+def make_cache(cache_name = "__ccache__"):
+    system("mkdir -p " + cache_name)
+
+#def build_module(module_name):
+#    get_header_file(module_name + ".c","__ccache__/" + module_name + ".h")
+
+def call_cc(fname,out,c=True,links=[]):
+    command = "cc -Wall -o " + out + " " + fname + " " + " ".join(links) + " -I__ccache__"
+    if (c):
+        command += " -c"
+    system(command)
+    return out
+
+def call_ar(fname,links,out):
+    command = "ar -cr " + out + " " + " ".join(links) + " " + fname
+    system(command)
+    return out
+
+def compile_module(fname,actual_name=""):
+    if (not os.path.isdir(fname)) and (not os.path.isfile(fname + ".c")):
+        cur_dir = os.path.abspath(os.curdir)
+        if (cur_dir == lib_path):
+            print("ERROR")
+            exit()
+        os.chdir(lib_path)
+        out,mod = compile_module(fname)
+        out = [os.path.abspath(i) for i in out]
+        header = os.path.abspath("__ccache__/" + fname + ".h")
+        os.chdir(cur_dir)
+        system("cp " + header + " " + os.path.abspath("__ccache__/" + fname + ".h"))
+        return out,mod
+
+    make_cache()
+    if (os.path.isdir(fname)):
+        cur_dir = os.path.abspath(os.curdir)
+        os.chdir(fname)
+        out,mod = compile_module("__init__",fname)
+        out = [os.path.abspath(i) for i in out]
+        header = os.path.abspath("__ccache__/__init__.h")
+        os.chdir(cur_dir)
+        system("cp " + header + " " + os.path.abspath("__ccache__/" + fname + ".h"))
+        return out, mod
+    else:
+        fname += ".c"
+        assert(os.path.isfile(fname))
+        modules = replace_imports_and_find_modules(fname,"__ccache__/" + fname)
+        links = []
+
+        rebuild = True
+        if (os.path.isfile("__ccache__/" + fname[:-2]+"_info")):
+            with open("__ccache__/" + fname[:-2]+"_info","r") as f:
+                last_build = float(f.read().splitlines()[0])
+            if (last_build == os.path.getmtime(fname)):
+                rebuild = False
+        rebuild = rebuild or force_rebuild
+
+        for module in modules:
+            link,modified = compile_module(module)
+            links += link
+            rebuild = rebuild or modified
+        #if len(links) == 0:
+        #    if os.path.isfile(fname[:-2] + "_info"):
+
+        if not rebuild:
+            return ["__ccache__/" + ".".join(fname.split(".")[:-1]) + ".o"] + links,False
+
+        get_header_file("__ccache__/" + fname,"__ccache__/" + ".".join(fname.split(".")[:-1]) + ".h",modules,actual_name)
+        this_unit = call_cc("__ccache__/" + fname,"__ccache__/" + ".".join(fname.split(".")[:-1]) + ".o")
+
+        if len(modules) == 0:
+            out = [this_unit]
+        else:
+            out = [this_unit] + links #call_ar(this_unit,links,"__ccache__/" + ".".join(fname.split(".")[:-1]) + ".a")
+
+        with open("__ccache__/" + fname[:-2]+"_info","w") as f:
+            f.write(str(os.path.getmtime(fname)) + "\n")
+            for i in modules:
+                f.write(i + "\n")
+
+        return out,True
+
+def compile_file(fname):
+    make_cache()
+    modules = replace_imports_and_find_modules(fname,"__ccache__/" + fname)
+    links = []
+
+    rebuild = True
+    if (os.path.isfile("__ccache__/" + fname[:-2]+"_info")):
+        with open("__ccache__/" + fname[:-2]+"_info","r") as f:
+            last_build = float(f.read().splitlines()[0])
+        if (last_build == os.path.getmtime(fname)):
+            rebuild = False
+    rebuild = rebuild or force_rebuild
+
+    for module in modules:
+        #build_module(module)
+        link,mod = compile_module(module)
+        rebuild = mod or rebuild
+        links += link
+    links = list(set(links))
+    out = ".".join(fname.split(".")[:-1]) + ".o"
+    if rebuild:
+        call_cc("__ccache__/" + fname,out,c=False,links=links)
+        with open("__ccache__/" + fname[:-2]+"_info","w") as f:
+            f.write(str(os.path.getmtime(fname)) + "\n")
+            for i in modules:
+                f.write(i + "\n")
+    return out
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compile .c")
+    parser.add_argument('inputs',metavar="<inputs>",type=str,nargs="+")
+    parser.add_argument('-B',action="store_true")
+    args = parser.parse_args()
+    force_rebuild = args.B
+    compile_file(args.inputs[0])
+    system("./" + ".".join(args.inputs[0].split(".")[:-1]) + ".o " + " ".join(args.inputs[1:]))
